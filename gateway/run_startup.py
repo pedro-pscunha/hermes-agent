@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from gateway.config import Platform
 from gateway.delivery import looks_like_telegram_private_chat_id
+from gateway.drain_control import drain_requested
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.session import SessionSource, build_session_key
@@ -1390,6 +1391,7 @@ class GatewayStartupMixin:
         logger.info("Starting Hermes Gateway...")
         self._start_install_faulthandler()
         self._start_log_startup_environment()
+        self._external_drain_active = await asyncio.to_thread(drain_requested)
         if await self._abort_startup_if_shutdown_requested():
             return True
         if self._start_check_access_policy():
@@ -1441,7 +1443,7 @@ class GatewayStartupMixin:
         self._wire_teams_pipeline_runtime()
         self._running = True
         self._install_plugin_message_injector()
-        self._update_runtime_status("running")
+        self._update_runtime_status("draining" if self._external_drain_active else "running")
         await self._start_finish_wiring(connected_count)
         self._start_spawn_background_watchers()
         logger.info("Press Ctrl+C to stop")

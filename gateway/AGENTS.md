@@ -124,6 +124,8 @@ an expiring access token that nothing refreshes.
 
 ## Gateway lifecycle vs. the Desktop app
 
+Read the existing native drain marker before connecting adapters; a retained maintenance pause must block new human work and publish draining status from the first startup turn, before the watcher runs. Internal completion routing keeps its existing drain semantics.
+
 `hermes serve` (control plane, desktop-spawned child) dies with the app — by design. The messaging
 gateway (`gateway run`) SURVIVES the app: the serve backend's `/api/gateway/*` endpoints spawn it
 detached (`_spawn_hermes_action` — `start_new_session` / `DETACHED_PROCESS`), so `before-quit`'s
