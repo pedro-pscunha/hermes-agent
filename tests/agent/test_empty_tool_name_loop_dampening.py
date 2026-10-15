@@ -265,3 +265,69 @@ def test_invalid_tool_exhaustion_closes_tool_tail(agent_env):
     assert msgs[-1].get("role") == "assistant"
     assert "invalid tool call" in (msgs[-1].get("content") or "").lower()
 
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_terminal_tool_validation_finalizes_once(agent_env, monkeypatch, truncated):
+    """Terminal validation must use the same lifecycle as a normal completed turn."""
+    agent, handler = agent_env
+    import hermes_cli.plugins as plugins
+    from hermes_cli.plugins_manifest import PluginManifest
+
+    manager = plugins.PluginManager()
+    agent._disable_streaming = True
+    context = plugins.PluginContext(PluginManifest(name="lifecycle-test", source="user"), manager)
+    events = []
+    for hook in ("transform_llm_output", "post_llm_call", "on_session_end", "pre_tool_call"):
+        def observe(_hook=hook, **kwargs):
+            events.append((_hook, kwargs))
+        context.register_hook(hook, observe)
+    monkeypatch.setattr(plugins, "_delivery_manager", lambda: manager)
+    monkeypatch.setattr(plugins, "get_plugin_manager", lambda: manager)
+    cleanup = []
+    persist = []
+    original_cleanup = agent._cleanup_task_resources
+    original_persist = agent._persist_session
+
+    def cleanup_resources(task_id):
+        cleanup.append(task_id)
+        return original_cleanup(task_id)
+
+    def persist_session(*args, **kwargs):
+        persist.append(args[0][-1]["role"])
+        return original_persist(*args, **kwargs)
+
+    monkeypatch.setattr(agent, "_cleanup_task_resources", cleanup_resources)
+    monkeypatch.setattr(agent, "_persist_session", persist_session)
+    if truncated:
+        handler.response_queue.append(_tc_resp("write_file", '{"path":'))
+    else:
+        handler.response_queue.extend(_tc_resp("frobnicate_xyz") for _ in range(3))
+    result = agent.run_conversation("test terminal validation", conversation_history=[], task_id="terminal-task")
+
+    assert result["failed"] is True
+    assert result["completed"] is False
+    assert result["partial"] is True
+    assert result["failure_reason"] == "truncated"
+    assert result["failure_retryable"] is True
+    assert result["final_response"]
+    assert "frobnicate_xyz" not in result["final_response"]
+    assert result["messages"][-1]["role"] == "assistant"
+    assert cleanup == ["terminal-task"]
+    assert persist.count("assistant") == 1
+    assert [name for name, _ in events] == ["transform_llm_output", "post_llm_call", "on_session_end"]
+    for _, event in events:
+        assert event["failed"] is True
+        assert event["session_id"] == agent.session_id
+        assert event["turn_id"] == events[-1][1]["turn_id"]
+    assert events[-1][1]["task_id"] == "terminal-task"
+
+    events.clear()
+    handler.response_queue.append(_text_resp("Recovered normally."))
+    successor = agent.run_conversation("new request", conversation_history=result["messages"], task_id="next-task")
+    assert successor["completed"] is True
+    assert successor["failed"] is False
+    assert cleanup == ["terminal-task", "next-task"]
+    assert persist.count("assistant") == 2
+    assert [name for name, _ in events] == ["transform_llm_output", "post_llm_call", "on_session_end"]
+    assert all(event["failed"] is False for _, event in events)
+

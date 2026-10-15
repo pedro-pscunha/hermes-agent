@@ -74,11 +74,12 @@ def run_tool_round(
 
     _tvv = validate_tool_calls(
         agent, assistant_message, finish_reason, messages=messages,
-        conversation_history=conversation_history, api_call_count=api_call_count,
-        effective_task_id=effective_task_id,
     )
-    if _tvv.action == "return":
-        return _verdict("return", _tvv.result)
+    if _tvv.action == "break":
+        final_response = _tvv.final_response
+        failed = True
+        _turn_exit_reason = _tvv.turn_exit_reason
+        return _verdict("break")
     if _tvv.action == "continue":
         return _verdict("continue")
 
