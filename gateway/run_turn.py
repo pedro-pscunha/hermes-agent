@@ -352,7 +352,12 @@ class GatewayTurnMixin:
 
         strict_session = bool(event_metadata.get("gateway_session_strict"))
         pinned_session_id = str(event_metadata.get("gateway_session_id") or "").strip()
-        if strict_session:
+        if event._injection_target is not None:
+            session_entry = await self._resolve_pinned_injection_target(event._injection_target)
+            if session_entry is None:
+                logger.warning("Dropping task-owned wake after session lineage changed")
+                return
+        elif strict_session:
             session_entry = await self.async_session_store.lookup_by_session_key(expected_session_key)
             if session_entry is None or not pinned_session_id or session_entry.session_id != pinned_session_id:
                 logger.warning(
@@ -1978,7 +1983,8 @@ class GatewayTurnMixin:
         _was_auto_reset, _is_new_session = await self._hmwa_open_session(session_entry, session_key, source)
         context = build_session_context(source, self.config, session_entry)
         # Session context variables for tools (task-local, concurrency-safe)
-        _session_env_tokens = self._set_session_env(context)
+        origin = getattr(event, "_injection_target", None)
+        _session_env_tokens = self._set_session_env(context, **({"injection_origin": origin} if origin is not None else {}))
         # Self-injected turns (MessageEvent(internal=True)) persist with a DB-only display_kind so
         # UIs render timeline notices, not user bubbles; role/content untouched.
         persist_user_display_kind = display_kind_for_event(event)

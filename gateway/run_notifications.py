@@ -962,6 +962,12 @@ class GatewayNotificationsMixin:
         Prefer the persisted session-store origin; the active foreground event causes cross-topic bleed.
         """
         from gateway.run import _parse_session_key
+        if evt.get("injection_target") is not None:
+            from gateway.session_context import InjectionTarget
+            target = InjectionTarget.from_dict(evt["injection_target"])
+            if target.session_key != evt.get("session_key"):
+                return None
+            return self._source_for_injection_target(target)
         session_key = str(evt.get("session_key") or "").strip()
         derived = {}
         if session_key:
@@ -1150,6 +1156,18 @@ class GatewayNotificationsMixin:
         gateway route. Not transactional: a crash after acceptance can replay (at-least-once).
         """
         from gateway.wake import WakeNotAccepted, adapter_supports_push, admit_internal_event
+        pinned_entry = None
+        if evt.get("injection_target") is not None:
+            from gateway.session_context import InjectionTarget
+            target = InjectionTarget.from_dict(evt["injection_target"])
+            if target.session_key != evt.get("session_key"):
+                return None
+            pinned_entry = await self._resolve_pinned_injection_target(target)
+            target_source = self._source_for_injection_target(target)
+            if pinned_entry is None or target_source is None or not self._is_user_authorized_for_source(
+                target_source, allow_adapter_delegation=False,
+            ):
+                return None
         source = await asyncio.to_thread(self._build_process_event_source, evt)
         if not source:
             # API-server sessions bind the RAW X-Hermes-Session-Id key, not a structured ``agent:...`` key.
@@ -1192,10 +1210,15 @@ class GatewayNotificationsMixin:
             parent_session_id = str(evt.get("parent_session_id") or "").strip()
             if parent_session_id:
                 metadata["gateway_session_id"] = parent_session_id
+            if pinned_entry is not None:
+                metadata["gateway_session_id"] = pinned_entry.session_id
+                metadata["gateway_session_strict"] = True
             synth_event = MessageEvent(
                 text=synth_text, message_type=MessageType.TEXT, source=source, internal=True,
                 message_id=str(evt.get("message_id") or "").strip() or None, metadata=metadata,
             )
+            if pinned_entry is not None:
+                synth_event._injection_target = target
             logger.info(
                 "Watch pattern notification — injecting for %s chat=%s thread=%s",
                 platform_name, source.chat_id, source.thread_id,
@@ -1582,6 +1605,14 @@ class GatewayNotificationsMixin:
 
     async def _enqueue_process_completion_notification(self, synth_text: str, evt: dict) -> Optional[bool]:
         """Fan in concurrent process completions that share one conversation."""
+        from gateway.run import _load_gateway_config
+        async with self._completion_event_scope(evt):
+            batching = (_load_gateway_config().get("display") or {}).get(
+                "background_process_completion_batching", True)
+            if not isinstance(batching, bool):
+                raise ValueError("display.background_process_completion_batching must be a boolean")
+            if not batching:
+                return await self._deliver_completion_notification(synth_text, evt)
         # Lazy defaults: lifecycle tests build GatewayRunner via object.__new__.
         for attr, default in (
             ("_completion_notification_batches", dict), ("_completion_notification_batch_tasks", dict),
@@ -1826,6 +1857,7 @@ class GatewayNotificationsMixin:
             "parent_session_id": (
                 watcher.get("parent_session_id") or getattr(session, "parent_session_id", "") or ""
             ),
+            "injection_target": watcher.get("injection_target") or getattr(session, "injection_target", None),
         }
 
     def _format_process_final_message(self, session_id: str, session, notify_mode: str) -> str:

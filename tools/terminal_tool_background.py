@@ -130,7 +130,9 @@ def _register_completion_watcher(process_registry, proc_session, session_key) ->
         **{attr.removeprefix("watcher_"): getattr(proc_session, attr)
            for attr, _ in _ROUTING_FIELDS[:-1]},
         "notify_on_complete": True, "parent_session_id": proc_session.parent_session_id,
+        "injection_target": proc_session.injection_target,
     }
+    process_registry._write_checkpoint()
     runner_ref = getattr(sys.modules.get("gateway.run"), "_gateway_runner_ref", None)
     runner = runner_ref() if callable(runner_ref) else None
     if runner is not None and runner.arm_process_watcher(watcher):

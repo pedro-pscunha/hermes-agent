@@ -4158,15 +4158,22 @@ class GatewayRunner(
         Platform.FEISHU, Platform.WECOM, Platform.WECOM_CALLBACK, Platform.WEIXIN, Platform.BLUEBUBBLES, Platform.QQBOT, Platform.LOCAL,
     })
 
-    def _set_session_env(self, context: SessionContext) -> list:
+    def _set_session_env(self, context: SessionContext, *, injection_origin=None) -> list:
         """Set session context variables (contextvars, not os.environ, so concurrent messages can't
         overwrite each other). Returns reset tokens for ``_clear_session_env`` in a ``finally``."""
         from gateway.session_context import set_session_vars
         # Async-delivery capability tells async tools whether this channel can wake a later turn. Default
         # True keeps CLI/unknown paths working; stateless adapters (api_server) declare False.
-        _adapter = (getattr(self, "adapters", None) or {}).get(context.source.platform)
+        _adapter = self._adapter_for_source(context.source)
         _async_delivery = getattr(_adapter, "supports_async_delivery", True)
+        _transport_platform = getattr(_adapter, "platform", context.source.platform)
+        _registered, _transport_profile = self._owning_profile(_adapter, _transport_platform)
         return set_session_vars(
+            native_source=context.source if _adapter is not None and _registered else None,
+            native_transport_profile=_transport_profile,
+            native_transport_platform=_transport_platform.value,
+            native_injection_origin=injection_origin,
+            session_id=context.session_id,
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
             chat_type=str(context.source.chat_type) if context.source.chat_type else "",

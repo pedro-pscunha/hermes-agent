@@ -148,8 +148,20 @@ async def test_plugin_context_routes_through_live_gateway_to_existing_session(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_uses_stored_origin_and_adapter_message_path():
+async def test_dispatch_rejects_handler_without_admission_receipt():
     adapter = SimpleNamespace(handle_message=AsyncMock())
+    entry = _entry()
+    runner = _runner(entry, adapter)
+    assert not await runner._dispatch_plugin_message_injection(
+        session_key=entry.session_key, content="wake", plugin_id="notify-plugin")
+    adapter.handle_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_stored_origin_and_adapter_message_path():
+    def admit(event):
+        event._gateway_accepted = True
+    adapter = SimpleNamespace(handle_message=AsyncMock(side_effect=admit))
     entry = _entry()
     runner = _runner(entry, adapter)
 

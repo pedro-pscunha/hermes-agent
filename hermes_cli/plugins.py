@@ -26,7 +26,10 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from gateway.session_context import InjectionTarget
 
 from hermes_constants import get_hermes_home, get_process_hermes_home, hermes_home_key
 from registration_lifecycle import replacement_coordinator
@@ -604,8 +607,19 @@ class PluginContext:
     # Fail-closed by construction: any failure to read consent state inside plugin_capability_granted
     # returns False. The profile-scoped config is passed through so a multi-profile process consults THIS
     # manager's home, never the active profile's (#65593 constraint).
+    def capture_injection_target(self, session_key: str | None = None) -> "InjectionTarget | None":
+        """Capture the current native requester for a later task-owned gateway turn."""
+        from gateway.session_context import capture_injection_target
+        return capture_injection_target(session_key)
+
+    def capture_injection_origin(self) -> "InjectionTarget | None":
+        """Read the original target admitted for this internal turn, never a manual-request identity."""
+        from gateway.session_context import capture_injection_origin
+        return capture_injection_origin()
+
     def inject_message(
         self, content: str, role: str = "user", *, session_key: str | None = None,
+        target: "InjectionTarget | None" = None,
     ) -> bool:
         """Inject a message into a CLI or gateway conversation (new turn if idle, interrupt if running).
         Gateway injection needs an existing ``session_key`` plus
@@ -631,6 +645,7 @@ class PluginContext:
         try:
             return bool(self._manager.inject_gateway_message(
                 session_key=session_key, content=msg, plugin_id=self.plugin_id,
+                **({"target": target} if target is not None else {}),
             ))
         except Exception:
             logger.warning("inject_message: gateway scheduling failed for plugin %s", self.plugin_id,

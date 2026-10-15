@@ -7,9 +7,12 @@ gateway.platforms.*.
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from gateway.session import SessionSource
+
+if TYPE_CHECKING:
+    from gateway.session_context import InjectionTarget
 
 
 class MessageType(Enum):
@@ -86,6 +89,8 @@ class MessageEvent:
 
     # Process-local admission receipt, never routing metadata or execution acknowledgement.
     _gateway_accepted: bool = field(default=False, init=False, repr=False, compare=False)
+    # Trusted producer snapshot; never reconstructed from inbound metadata.
+    _injection_target: Optional["InjectionTarget"] = field(default=None, init=False, repr=False, compare=False)
     # Run-owned final presentation snapshot; never deserialized from ingress metadata.
     _notification_reply_muted: Optional[bool] = field(default=None, init=False, repr=False, compare=False)
 
