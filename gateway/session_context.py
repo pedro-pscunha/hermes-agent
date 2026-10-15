@@ -8,7 +8,61 @@ other's routing ids.  ``get_session_env`` is a drop-in for ``os.getenv``.
 import os
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator
+from copy import copy
+from dataclasses import asdict, dataclass, replace
+from typing import Any, Iterator, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from gateway.session import SessionSource
+
+
+@dataclass(frozen=True)
+class InjectionTarget:
+    """A native requester's route and session lineage, never a fresh authority grant."""
+
+    session_key: str
+    session_id: str
+    source: "SessionSource"
+    transport_profile: str | None = None
+    transport_platform: str | None = None
+
+    def to_dict(self) -> dict:
+        source = asdict(self.source)
+        source["platform"] = self.source.platform.value
+        return {"session_key": self.session_key, "session_id": self.session_id, "source": source,
+                "transport_profile": self.transport_profile, "transport_platform": self.transport_platform}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "InjectionTarget":
+        from gateway.config import Platform
+        from gateway.session import SessionSource
+
+        source = dict(data["source"])
+        source["platform"] = Platform(source["platform"])
+        return cls(session_key=data["session_key"], session_id=data["session_id"],
+                   source=SessionSource(**source), transport_profile=data["transport_profile"],
+                   transport_platform=data["transport_platform"])
+
+
+_NATIVE_TARGET: ContextVar[InjectionTarget | None] = ContextVar("native_injection_target", default=None)
+_INJECTION_ORIGIN: ContextVar[InjectionTarget | None] = ContextVar("admitted_injection_origin", default=None)
+
+
+def capture_injection_origin() -> InjectionTarget | None:
+    """Original target of this admitted internal turn; absent for ordinary/manual requests."""
+    origin = _INJECTION_ORIGIN.get()
+    return replace(origin, source=copy(origin.source)) if origin is not None else None
+
+
+def capture_injection_target(session_key: str | None = None) -> InjectionTarget | None:
+    """Capture only a bound native request; environment variables cannot supply its identity."""
+    target = _NATIVE_TARGET.get()
+    key, session_id = _SESSION_KEY.get(), _SESSION_ID.get()
+    if target is None or not isinstance(key, str) or not key or not isinstance(session_id, str) or not session_id:
+        return None
+    if session_key is not None and session_key != key:
+        return None
+    return replace(target, session_key=key, session_id=session_id, source=copy(target.source))
 
 # "Never set here" (falls back to os.environ for CLI/cron) vs "" = explicitly cleared (no fallback).
 _UNSET: Any = object()
@@ -120,6 +174,10 @@ def set_session_vars(
     browser_control_transport_family: str = "", cwd: str = "", async_delivery: bool = True,
     ui_session_id: str = "", cron_session: Any = _UNSET, parent_chat_id: str = "",
     session_history_delivery: str | None = None,
+    native_source: "SessionSource | None" = None,
+    native_transport_profile: str | None = None,
+    native_transport_platform: str | None = None,
+    native_injection_origin: InjectionTarget | None = None,
 ) -> list:
     """Set all session context variables and return reset tokens.  Call
     ``clear_session_vars(tokens)`` in a ``finally``; not nestable, clearing resets every var
@@ -132,6 +190,9 @@ def set_session_vars(
     cannot grant wake authority."""
     global _session_context_engaged
     _session_context_engaged = True
+    _NATIVE_TARGET.set(InjectionTarget(session_key, session_id, copy(native_source),
+        native_transport_profile, native_transport_platform) if native_source is not None else None)
+    _INJECTION_ORIGIN.set(native_injection_origin)
     values = (
         platform, source, chat_id, chat_type, chat_name, thread_id, user_id, user_id_alt,
         user_name, scope_id, session_key, session_id, ui_session_id, message_id, profile,
@@ -150,6 +211,8 @@ def clear_session_vars(tokens: list) -> None:
     goes back to ``_UNSET``: a cleared context is default-supported, not opted-out.  Wake
     capability goes back to ``_UNSET`` too — but for the opposite reason: a cleared context has
     declared nothing, and an undeclared capability FAILS CLOSED (#98619)."""
+    _NATIVE_TARGET.set(None)
+    _INJECTION_ORIGIN.set(None)
     for var in _SESSION_VARS:
         var.set("")
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
@@ -163,6 +226,8 @@ def reset_session_vars() -> None:
     task inherits A's already-set vars and a subprocess spawned before B binds would read A's
     identity.  ``_SESSION_ASYNC_DELIVERY`` and ``_SESSION_HISTORY_DELIVERY`` (outside ``_VAR_MAP``)
     are reset explicitly too."""
+    _NATIVE_TARGET.set(None)
+    _INJECTION_ORIGIN.set(None)
     for var in _VAR_MAP.values():
         var.set(_UNSET)
     _SESSION_ASYNC_DELIVERY.set(_UNSET)

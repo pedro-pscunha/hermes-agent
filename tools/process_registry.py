@@ -514,6 +514,7 @@ class ProcessSession:
     # Session-db id of the spawning conversation; lets the gateway drop completions whose
     # session was closed at a user boundary (/new) instead of injecting into the NEW one.
     parent_session_id: str = ""
+    injection_target: Optional[dict] = None
     notify_on_complete: bool = False            # Queue agent notification on exit
     watch_patterns: List[str] = field(default_factory=list)
     _watch_hits: int = field(default=0, repr=False)          # total matches delivered
@@ -554,7 +555,7 @@ _CHECKPOINT_FIELDS = (
     "command", "pid", "pid_scope", "host_start_time", "systemd_unit", "cwd",
     "started_at", "task_id", "owner_task_id", "session_key",
     *(f"watcher_{k}" for k in _WATCHER_ROUTE_KEYS), "watcher_interval",
-    "parent_session_id", "notify_on_complete", "watch_patterns")
+    "parent_session_id", "injection_target", "notify_on_complete", "watch_patterns")
 _CHECKPOINT_DEFAULTS = {
     f.name: ([] if f.name == "watch_patterns" else f.default)
     for f in ProcessSession.__dataclass_fields__.values()
@@ -717,6 +718,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
             "session_key": session.session_key,
             "task_id": session.task_id,
             "owner_task_id": session.owner_task_id or session.task_id,
+            "injection_target": session.injection_target,
             "command": session.command,
             **{key: getattr(session, f"watcher_{key}") for key in _WATCHER_ROUTE_KEYS},
         }
@@ -943,12 +945,14 @@ class ProcessRegistry(ProcessCheckpointMixin):
 
     @staticmethod
     def _new_session(command, task_id, owner_task_id, session_key, cwd, **extra) -> ProcessSession:
-        from gateway.session_context import get_session_env
+        from gateway.session_context import capture_injection_target, get_session_env
 
+        target = capture_injection_target(session_key)
         return ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}", command=command, task_id=task_id,
             owner_task_id=owner_task_id or task_id, session_key=session_key, cwd=cwd,
             parent_session_id=get_session_env("HERMES_SESSION_ID", ""),
+            injection_target=target.to_dict() if target is not None else None,
             started_at=time.time(), **extra)
 
     @staticmethod

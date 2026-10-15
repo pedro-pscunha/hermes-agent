@@ -113,6 +113,7 @@ class ProcessCheckpointMixin:
                     **{key: getattr(session, f"watcher_{key}") for key in _WATCHER_ROUTE_KEYS},
                     "notify_on_complete": session.notify_on_complete,
                     "parent_session_id": session.parent_session_id,
+                    "injection_target": session.injection_target,
                 })
         self._write_checkpoint(extra_entries=unresolved_scope_entries)
         return recovered

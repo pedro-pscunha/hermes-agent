@@ -17,6 +17,7 @@ import os
 import re
 import time
 from contextlib import suppress
+from copy import copy
 from gateway.config import Platform
 from gateway.platforms.base import EphemeralReply
 from gateway.platforms.event import MessageEvent, MessageType
@@ -32,6 +33,8 @@ from gateway.turn_lease import TurnLeaseTimeoutError
 from typing import Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
+    from gateway.session_context import InjectionTarget
+    from gateway.session import SessionEntry
     from gateway.run import GatewayRunner  # noqa: F401
     from gateway.run_turn_runner import TurnRunner  # noqa: F401
 
@@ -226,6 +229,14 @@ class GatewayInboundMixin:
             return None
 
         if is_internal:
+            if event._injection_target is not None:
+                source = self._source_for_injection_target(event._injection_target)
+                if source is None:
+                    return None
+                event.source = source
+                if not self._is_user_authorized_for_source(source, allow_adapter_delegation=False):
+                    logger.warning("Dropping task-owned wake after requester authorization changed")
+                    return None
             return event, source, True
 
         # scale-to-zero: only real user-originated inbound stamps the last-inbound clock;
@@ -1804,7 +1815,7 @@ class GatewayInboundMixin:
         get_plugin_manager().clear_gateway_message_injector(self)
 
     def _schedule_plugin_message_injection(
-        self, *, session_key: str, content: str, plugin_id: str
+        self, *, session_key: str, content: str, plugin_id: str, target: InjectionTarget | None = None,
     ) -> bool:
         """Schedule a plugin-triggered turn on the live gateway loop (thread-safe)."""
         from gateway.run import safe_schedule_threadsafe
@@ -1814,6 +1825,7 @@ class GatewayInboundMixin:
 
         coro = self._dispatch_plugin_message_injection(
             session_key=session_key, content=content, plugin_id=plugin_id,
+            **({"target": target} if target is not None else {}),
         )
         try:
             current_loop = asyncio.get_running_loop()
@@ -1853,8 +1865,62 @@ class GatewayInboundMixin:
         future.add_done_callback(_log_result)
         return True
 
+    def _source_for_injection_target(self, target: InjectionTarget) -> SessionSource | None:
+        """Rebind durable transport provenance to its current registered adapter and authority home."""
+        import weakref
+        from hermes_cli.profiles import get_profile_dir
+        from hermes_constants import get_process_hermes_home
+
+        platform = Platform(target.transport_platform) if target.transport_platform else target.source.platform
+        adapters = (self._primary_adapters() if target.transport_profile is None
+                    else self._profile_adapters_map().get(target.transport_profile, {}))
+        adapter = adapters.get(platform)
+        if adapter is None:
+            return None
+        source = copy(target.source)
+        source._transport_adapter_ref = weakref.ref(adapter)
+        source._authorization_profile_home = (get_process_hermes_home() if target.transport_profile is None
+                                               else get_profile_dir(target.transport_profile))
+        return source
+
+    async def _resolve_pinned_injection_target(self, target: InjectionTarget) -> SessionEntry | None:
+        """Resolve only the original live route or its verified compression continuation."""
+        with self._profile_scope_for_source(target.source):
+            if not target.session_id or self._session_key_for_source(target.source) != target.session_key:
+                return None
+            generation = self._current_session_run_generation(target.session_key)
+            entry = await self.async_session_store.lookup_by_session_key(target.session_key)
+            if entry is None or entry.origin is None:
+                return None
+            if any(getattr(target.source, name) != getattr(entry.origin, name)
+                   for name in ("platform", "chat_id", "thread_id", "scope_id", "parent_chat_id", "profile")):
+                return None
+            db = self._session_db
+            if db is None:
+                return None
+            row = await db.get_session(target.session_id)
+            if row is None:
+                return None
+            resolved_id = target.session_id
+            if row.get("ended_at"):
+                if row.get("end_reason") != "compression":
+                    return None
+                resolved_id = await self._resolve_compression_lineage_target(db, entry, target.session_id)
+                if resolved_id is None:
+                    return None
+            elif entry.session_id != target.session_id:
+                return None
+            if not self._is_session_run_current(target.session_key, generation):
+                return None
+            if entry.session_id != resolved_id:
+                entry = await self.async_session_store.advance_compression_session(
+                    target.session_key, entry.session_id, resolved_id)
+            if not self._is_session_run_current(target.session_key, generation):
+                return None
+            return entry
+
     async def _dispatch_plugin_message_injection(
-        self, *, session_key: str, content: str, plugin_id: str
+        self, *, session_key: str, content: str, plugin_id: str, target: InjectionTarget | None = None,
     ) -> bool:
         """Route a plugin-triggered turn through the session's live adapter."""
         def _accepting() -> bool:
@@ -1862,11 +1928,16 @@ class GatewayInboundMixin:
 
         if not _accepting():
             return False
-        entry = await self.async_session_store.lookup_by_session_key(session_key)
+        if target is not None and target.session_key != session_key:
+            return False
+        entry = (await self._resolve_pinned_injection_target(target) if target is not None
+                 else await self.async_session_store.lookup_by_session_key(session_key))
         if entry is None or entry.origin is None or not _accepting():
             return False
 
-        source = dataclasses.replace(entry.origin)
+        source = self._source_for_injection_target(target) if target is not None else dataclasses.replace(entry.origin)
+        if source is None:
+            return False
         try:
             authorized = self._is_user_authorized_for_source(source, allow_adapter_delegation=False)
         except Exception:
@@ -1886,7 +1957,8 @@ class GatewayInboundMixin:
         if adapter is None:
             return False
 
-        await adapter.handle_message(MessageEvent(
+        from gateway.wake import WakeNotAccepted, admit_internal_event
+        event = MessageEvent(
             text=content, message_type=MessageType.TEXT, source=source, internal=True,
             allow_gateway_control=False,
             metadata={
@@ -1894,7 +1966,12 @@ class GatewayInboundMixin:
                 "gateway_session_key": session_key, "gateway_session_id": entry.session_id,
                 "gateway_session_strict": True,
             },
-        ))
+        )
+        event._injection_target = target
+        try:
+            await admit_internal_event(adapter, event)
+        except WakeNotAccepted:
+            return False
         logger.info(
             "Plugin message injection dispatched: plugin=%s session=%s session_id=%s",
             plugin_id, session_key, entry.session_id,

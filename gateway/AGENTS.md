@@ -58,6 +58,8 @@ MagicMock adapters in older tests auto-create truthy attributes.
 
 ## Background process notifications
 
+Task-owned plugin wakes capture `PluginContext.capture_injection_target()` during native intake and pass `target=` to `inject_message`; scheduling success is not turn-start proof. The target and process watcher snapshot preserve the original requester and ingress transport profile, recheck authorization at dequeue, and permit only verified compression lineage, never a reset or a replacement requester. `capture_injection_origin()` identifies the original target only inside its admitted internal turn; manual retrieval cannot manufacture that proof. `display.background_process_completion_batching: false` keeps each process completion separate in its owning profile; other profiles retain batching by default. Independent busy human requests use `display.busy_input_mode: queue` with `display.busy_text_mode: interrupt` to enter FIFO without steering or text debounce merging.
+
 `terminal(background=true, notify_on_complete=true)` starts a gateway watcher that detects
 completion and triggers a new agent turn. Verbosity: `display.background_process_notifications`
 (or `HERMES_BACKGROUND_NOTIFICATIONS`): `concise` (default; one line, failures append an output
