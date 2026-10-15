@@ -410,7 +410,7 @@ def _last_turn_reasoning(messages) -> Optional[Any]:
 
 def _apply_output_hooks(
     agent, final_response, logger, *, platform, effective_task_id, turn_id, original_user_message,
-    messages,
+    messages, failed=False,
 ) -> Tuple[Any, bool, Optional[Any]]:
     """Fire ``transform_llm_output`` then ``post_llm_call`` once per turn after the tool loop.
     Returns ``(final_response, transformed, pre_transform_response)``."""
@@ -423,6 +423,7 @@ def _apply_output_hooks(
         model=agent.model,
         platform=platform,
         turn_id=turn_id,  # per-turn identity for the hook callback gate
+        failed=failed,
     ):
         if isinstance(_hook_result, str) and _hook_result:
             pre_transform, final_response, transformed = final_response, _hook_result, True
@@ -439,6 +440,7 @@ def _apply_output_hooks(
             conversation_history=list(messages),
             model=agent.model,
             platform=platform,
+            failed=failed,
         )
     return final_response, transformed, pre_transform
 
@@ -532,6 +534,7 @@ def finalize_turn(
         final_response, _response_transformed, _pre_transform_response = _apply_output_hooks(
             agent, final_response, logger, platform=_platform, effective_task_id=effective_task_id,
             turn_id=turn_id, original_user_message=original_user_message, messages=messages,
+            failed=failed,
         )
 
     # Context engine observation hook: the turn finished with the finalized transcript.
@@ -566,7 +569,7 @@ def finalize_turn(
         "completed": completed,
         "turn_exit_reason": _turn_exit_reason,
         "failed": failed,
-        "partial": False,  # True only when stopped due to invalid tool calls
+        "partial": _turn_exit_reason in {"invalid_tool_calls", "truncated_tool_arguments"},
         "interrupted": interrupted,
         "response_transformed": _response_transformed,
         "pre_transform_response": _pre_transform_response,

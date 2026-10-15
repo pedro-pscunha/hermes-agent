@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from agent.message_metadata import append_message
-from agent.message_sanitization import close_interrupted_tool_sequence, coalesce_tool_call_id
-from agent.turn_failure_copy import site_copy, stamp_failure
+from agent.message_sanitization import coalesce_tool_call_id
+from agent.turn_failure_copy import site_copy
 
 logger = logging.getLogger("agent.conversation_loop")
 
@@ -26,14 +26,15 @@ class ToolValidationVerdict:
     """Outcome of ``validate_tool_calls``.
 
     ``action``: ``"ok"`` (dispatch the calls), ``"continue"`` (re-issue the API call —
-    error results / retry state were recorded) or ``"return"`` (terminal partial
-    result in ``result``). ``mixed_invalid_batch`` is True when the batch contains BOTH
+    error results / retry state were recorded) or ``"break"`` (terminal failure
+    for the common finalizer). ``mixed_invalid_batch`` is True when the batch contains BOTH
     valid and unknown tool names: only the invalid calls get error results, the valid
     ones run."""
 
     action: str
-    result: Optional[Dict[str, Any]]
     mixed_invalid_batch: bool
+    final_response: Optional[str] = None
+    turn_exit_reason: Optional[str] = None
 
 
 def _preview_name(name: str) -> str:
@@ -51,25 +52,8 @@ def _append_tool_error_results(messages, tool_calls, content_for) -> None:
         })
 
 
-def _partial_exit(agent, messages, conversation_history, api_call_count, final_response: str) -> Dict[str, Any]:
-    """Terminal partial result. Prior retries or an earlier tool batch leave a tool-result
-    tail; close it as interrupt aborts do so the next turn is not tool→user (#48879).
-    This path never reaches finalize_turn, so persist here."""
-    close_interrupted_tool_sequence(messages, final_response)
-    agent._persist_session(messages, conversation_history)
-    return stamp_failure({
-        "final_response": final_response,
-        "messages": messages,
-        "api_calls": api_call_count,
-        "completed": False,
-        "partial": True,
-        "error": final_response,
-    }, "truncated", True)
-
-
 def validate_tool_calls(
     agent: Any, assistant_message: Any, finish_reason: str, *, messages: List[Dict[str, Any]],
-    conversation_history: Any, api_call_count: int, effective_task_id: Any,
 ) -> ToolValidationVerdict:
     """Validate ``assistant_message.tool_calls`` in place (ids uniquified, names
     repaired, dict/empty args normalized to JSON strings). Strikes for invalid names
@@ -81,8 +65,11 @@ def validate_tool_calls(
     tool_calls = assistant_message.tool_calls
     valid_names = agent.valid_tool_names
 
-    def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ToolValidationVerdict:
-        return ToolValidationVerdict(action=action, result=result, mixed_invalid_batch=_mixed_invalid_batch)
+    def _verdict(action: str, reason: Optional[str] = None) -> ToolValidationVerdict:
+        return ToolValidationVerdict(
+            action=action, mixed_invalid_batch=_mixed_invalid_batch,
+            final_response=site_copy(reason) if reason else None, turn_exit_reason=reason,
+        )
 
     # Uniquify duplicate tool-call ids BEFORE any downstream consumer: the
     # pre-API sanitizer keeps only the first call/result per id.
@@ -120,10 +107,7 @@ def validate_tool_calls(
             agent._flush_status_buffer()
             agent._vprint(f"{agent.log_prefix}❌ Max retries (3) for invalid tool calls exceeded. Stopping as partial.", force=True, diagnostic=True)
             agent._invalid_tool_retries = 0
-            return _verdict("return", _partial_exit(
-                agent, messages, conversation_history, api_call_count,
-                f"Model generated invalid tool call: {invalid_preview}",
-            ))
+            return _verdict("break", "invalid_tool_calls")
 
         append_message(messages, agent._build_assistant_message(assistant_message, finish_reason))
         # See _invalid_tool_name_error_content for the blank-name anti-priming rationale (#47967).
@@ -176,10 +160,7 @@ def validate_tool_calls(
                 force=True, diagnostic=True,
             )
             agent._invalid_json_retries = 0
-            agent._cleanup_task_resources(effective_task_id)
-            return _verdict("return", _partial_exit(
-                agent, messages, conversation_history, api_call_count, site_copy("truncated"),
-            ))
+            return _verdict("break", "truncated_tool_arguments")
 
         agent._invalid_json_retries += 1
         tool_name, error_msg = invalid_json_args[0]

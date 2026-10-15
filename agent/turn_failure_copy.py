@@ -77,6 +77,8 @@ class ExitFailure(NamedTuple):
 # (exit-reason prefix, failure_reason, retryable, fails_turn). Prefix match: several reasons
 # carry a parenthesised detail (``local_processing_error(...)``).
 _EXIT_REASON_FAILURES: Tuple[Tuple[str, str, bool, bool], ...] = (
+    ("invalid_tool_calls", "truncated", True, True),
+    ("truncated_tool_arguments", "truncated", True, True),
     # Advisory: the reasoning-only text may literally be the answer, and cron stays silent.
     ("empty_response_exhausted", "empty_response", True, False),
     ("all_retries_exhausted_no_response", FailoverReason.server_error.value, True, True),
@@ -277,7 +279,17 @@ _ONE_OFF_COPY: Dict[str, str] = {
         "a backup provider with `hermes fallback add`."
     ),
 }
-_SITE_COPY: Dict[str, str] = {**_FAILURE_CODE_COPY, **_ONE_OFF_COPY}
+_SITE_COPY: Dict[str, str] = {
+    **_FAILURE_CODE_COPY, **_ONE_OFF_COPY,
+    "invalid_tool_calls": (
+        "The model repeatedly returned invalid tool calls, so this turn stopped. "
+        + PARTIAL_FAILED_TURN_NOTICE
+    ),
+    "truncated_tool_arguments": (
+        "The model's tool arguments were cut off, so the incomplete action was not run. "
+        + PARTIAL_FAILED_TURN_NOTICE
+    ),
+}
 
 
 def site_copy(code: str, **fields: Any) -> str:
