@@ -12,7 +12,6 @@ import re
 import asyncio
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from contextvars import ContextVar
 import logging
 import threading
 import time
@@ -25,18 +24,6 @@ from tools.arg_coercion import coerce_tool_args
 from utils import file_signature
 
 logger = logging.getLogger(__name__)
-
-_post_tool_call_hook_suppressed: ContextVar[bool] = ContextVar("post_tool_call_hook_suppressed", default=False)
-
-
-@contextmanager
-def suppress_post_tool_call_hook():
-    """Let an outer executor own the terminal post-tool event."""
-    token = _post_tool_call_hook_suppressed.set(True)
-    try:
-        yield
-    finally:
-        _post_tool_call_hook_suppressed.reset(token)
 
 # Platform-bundle names already flagged in disabled_toolsets (advisory logged once per name).
 _WARNED_DISABLED_BUNDLES: set = set()
@@ -680,8 +667,6 @@ def _emit_post_tool_call_hook(
 ) -> None:
     """Emit the ``post_tool_call`` observer hook; gated on has_hook, and ok/error
     fields are derived from the result only past that gate when status is None."""
-    if _post_tool_call_hook_suppressed.get():
-        return
     try:
         from hermes_cli.lifecycle import has_hook, invoke_hook
         if not has_hook("post_tool_call"):
@@ -871,6 +856,7 @@ def handle_function_call(
     skip_pre_tool_call_hook: bool = False, skip_tool_request_middleware: bool = False,
     skip_tool_execution_middleware: bool = False, tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
     enabled_toolsets: Optional[List[str]] = None, disabled_toolsets: Optional[List[str]] = None,
+    skip_post_tool_call_hook: bool = False,
 ) -> str:
     """Route a tool call through hooks/middleware to the registry; returns a JSON string.
 
@@ -879,6 +865,8 @@ def handle_function_call(
     ``_last_resolved_tool_names``). skip_pre_tool_call_hook: caller already fired
     it (single-fire contract). enabled/disabled_toolsets scope the Tool Search
     bridge catalog to this session's grant (None = unrestricted).
+    skip_post_tool_call_hook: the outer executor owns this invocation's terminal event.
+    This is a dispatch argument, never ambient state inherited by background completion turns.
     """
     function_args = coerce_tool_args(function_name, function_args)
     if not isinstance(function_args, dict):
@@ -890,8 +878,9 @@ def handle_function_call(
 
     def _emit(result: Any, **extra: Any) -> Any:
         """Emit post_tool_call with this call's identity fields; returns *result*."""
-        _emit_post_tool_call_hook(function_name=function_name, function_args=function_args, result=result,
-                                  **asdict(ids), middleware_trace=list(trace), **extra)
+        if not skip_post_tool_call_hook:
+            _emit_post_tool_call_hook(function_name=function_name, function_args=function_args, result=result,
+                                      **asdict(ids), middleware_trace=list(trace), **extra)
         return result
 
     # Tool Search bridge: tool_search / tool_describe are catalog reads handled
@@ -908,12 +897,14 @@ def handle_function_call(
                 underlying[1]["calls"], ids, user_task=user_task,
                 enabled_tools=enabled_tools, middleware_trace=trace,
                 enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
+                skip_post_tool_call_hook=skip_post_tool_call_hook,
             ), duration_ms=_elapsed_ms(start))
         return handle_function_call(
             *underlying, **asdict(ids), user_task=user_task, enabled_tools=enabled_tools,
             skip_pre_tool_call_hook=skip_pre_tool_call_hook, skip_tool_request_middleware=skip_tool_request_middleware,
             skip_tool_execution_middleware=skip_tool_execution_middleware, tool_request_middleware_trace=list(trace),
             enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
+            skip_post_tool_call_hook=skip_post_tool_call_hook,
         )
 
     from tools.connectors import is_connector_name
