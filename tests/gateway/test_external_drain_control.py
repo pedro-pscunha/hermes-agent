@@ -14,7 +14,8 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -325,4 +326,52 @@ class TestNewTurnGate:
         result = await runner._handle_message(event)
         assert result is not None
         assert "draining" in result.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker", ["active", "absent", "expired", "foreign_epoch"])
+async def test_startup_honors_retained_drain_before_first_watcher_tick(home, marker):
+    if marker != "absent":
+        body = dc.write_drain_request(principal="deployment")
+        if marker == "expired":
+            body["requested_at"] = "2000-01-01T00:00:00+00:00"
+        elif marker == "foreign_epoch":
+            body["epoch"] = "different-instantiation"
+        dc.drain_request_path().write_text(json.dumps(body))
+    runner, _ = _drain_runner()
+    for name in ("_start_install_faulthandler", "_start_log_startup_environment",
+                 "_start_startup_warmup", "_wire_teams_pipeline_runtime",
+                 "_install_plugin_message_injector", "_start_spawn_background_watchers"):
+        setattr(runner, name, MagicMock())
+    runner._abort_startup_if_shutdown_requested = AsyncMock(return_value=False)
+    runner._start_check_access_policy = MagicMock(return_value=False)
+    runner._start_recover_previous_run = AsyncMock()
+    runner._run_free_tier_bootstrap = AsyncMock()
+    runner._start_prefilter_platforms = AsyncMock(return_value=(False, 1, set(), []))
+    runner._start_connect_pending = AsyncMock(return_value=[])
+    runner._start_aggregate_connect_results = AsyncMock(return_value=1)
+    runner._start_secondary_profiles = AsyncMock(return_value=(False, 1))
+    runner._start_handle_no_connections = MagicMock(return_value=False)
+    runner.delivery_router = SimpleNamespace(adapters={})
+    runner._claim_active_session_slot = MagicMock(return_value=(None, "admission reached"))
+    event = MessageEvent(text="hello", message_type=MessageType.TEXT,
+                         source=make_restart_source(), message_id="first-after-restart")
+    observed = []
+
+    async def first_message(_connected_count):
+        runner._startup_restore_in_progress = False
+        observed.append(await runner._handle_message(event))
+
+    runner._start_finish_wiring = first_message
+    assert await runner.start() is True
+    if marker == "active":
+        assert "draining" in observed[0].lower()
+        runner._claim_active_session_slot.assert_not_called()
+        runner._update_runtime_status.assert_called_with("draining")
+        dc.clear_drain_request()
+        runner._exit_external_drain()
+        assert await runner._handle_message(event) == "admission reached"
+    else:
+        assert observed == ["admission reached"]
+        runner._update_runtime_status.assert_called_with("running")
 
