@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from gateway.config import Platform
-from gateway.platforms.event import MessageEvent, MessageType
+from gateway.platforms.event import FinalReplyAnchor, MessageEvent, MessageType
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 
@@ -67,7 +67,9 @@ def _fake_tts_call(monkeypatch, audio_bytes=b"\x00" * 32):
 
 
 @pytest.mark.asyncio
-async def test_voice_reply_marks_existing_thread_metadata_without_mutation(monkeypatch, tmp_path):
+@pytest.mark.parametrize("queued_anchor", [None, FinalReplyAnchor("m2"), FinalReplyAnchor(None)])
+@pytest.mark.parametrize("platform", [Platform.TELEGRAM, Platform.SLACK])
+async def test_voice_reply_marks_existing_thread_metadata_without_mutation(monkeypatch, tmp_path, queued_anchor, platform):
     """When thread metadata exists (Telegram DM-topic), notify=True is added without mutating the source dict."""
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
     _fake_tts_call(monkeypatch)
@@ -76,6 +78,12 @@ async def test_voice_reply_marks_existing_thread_metadata_without_mutation(monke
     runner = _runner_with_adapter(send_voice)
     # Use a DM topic source so _thread_metadata_for_source returns a non-None dict.
     event = _make_event(thread_id="17585")
+    event.source.platform = platform
+    runner.adapters[platform] = runner.adapters[Platform.TELEGRAM]
+    event.source.scope_id = "workspace"
+    event.source.parent_chat_id = "parent-channel"
+    event.source.message_id = "source-m1"
+    event._final_reply_anchor = queued_anchor
     source_meta_snapshot = runner._thread_metadata_for_source(
         event.source, runner._reply_anchor_for_event(event)
     )
@@ -87,9 +95,14 @@ async def test_voice_reply_marks_existing_thread_metadata_without_mutation(monke
     send_voice.assert_awaited_once()
     kwargs = send_voice.await_args.kwargs
     assert kwargs["metadata"].get("notify") is True
+    expected = "m1" if queued_anchor is None else queued_anchor.reply_to
+    assert kwargs["reply_to"] == expected
+    anchor_key = "telegram_reply_to_message_id" if platform == Platform.TELEGRAM else "message_id"
+    assert kwargs["metadata"].get(anchor_key) == expected
     # All pre-existing thread keys are preserved.
     for k, v in snapshot_copy.items():
-        assert kwargs["metadata"].get(k) == v
+        if k != anchor_key:
+            assert kwargs["metadata"].get(k) == v
     # The freshly-computed source-side metadata must NOT have been mutated
     # (would otherwise leak notify=True into the typing-indicator state).
     fresh = runner._thread_metadata_for_source(
