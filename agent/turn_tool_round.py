@@ -176,6 +176,29 @@ def run_tool_round(
                     agent.stream_delta_callback(None)
         return _verdict("break")
 
+    # Policy may yield after this entire batch is durable. Consume the return value
+    # here, never an ambient flag that a watcher or a later turn could inherit.
+    # Existing failure/guardrail exits above and a pending user interruption win.
+    if not failed and not agent._interrupt_requested:
+        from hermes_cli.lifecycle import has_hook, invoke_hook
+
+        try:
+            directives = invoke_hook(
+                "post_tool_round", task_id=effective_task_id, session_id=agent.session_id or "",
+                turn_id=agent._current_turn_id, api_request_id=agent._current_api_request_id,
+                tool_call_ids=tuple(coalesce_tool_call_id(tc) for tc in assistant_message.tool_calls),
+            ) if has_hook("post_tool_round") else []
+        except Exception:
+            logger.warning("post_tool_round hook failed", exc_info=True)
+            directives = []
+        if not agent._interrupt_requested and any(
+            isinstance(directive, dict) and directive == {"action": "yield"}
+            for directive in directives
+        ):
+            final_response = "[SILENT]"
+            _turn_exit_reason = "yielded"
+            return _verdict("break")
+
     # Reset per-turn retry counters so one truncation can't poison the turn.
     truncated_tool_call_retries = 0
     # Defer the paragraph break: _fire_stream_delta() prepends one "\n\n" when real

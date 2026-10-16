@@ -162,7 +162,7 @@ def _resolve_budget_fallback(
     # close the parent's run and release its claim (#112817).
     _kanban_task = (
         os.environ.get("HERMES_KANBAN_TASK")
-        if budget_exhausted and is_dispatcher_owned_worker_context() else None
+        if budget_exhausted and _turn_exit_reason != "yielded" and is_dispatcher_owned_worker_context() else None
     )
     # If running as a kanban worker, signal the dispatcher that the worker could not complete (rather than
     # treating it as a protocol violation). This applies whether the user-facing fallback came from the
@@ -478,7 +478,8 @@ def finalize_turn(
         final_response is not None
         and not failed
         and not interrupted
-        and (api_call_count < agent.max_iterations or str(_turn_exit_reason).startswith("text_response("))
+        and (api_call_count < agent.max_iterations or str(_turn_exit_reason).startswith("text_response(")
+             or _turn_exit_reason == "yielded")
     )
 
     _rollback_interrupted_preflight_display(agent, interrupted)
@@ -520,9 +521,9 @@ def finalize_turn(
     _log_turn_exit(agent, messages, final_response, api_call_count, _turn_exit_reason, interrupted, logger)
 
     # Response transforms apply only to real, uninterrupted responses.
-    if final_response and not interrupted:
+    if final_response and not interrupted and _turn_exit_reason != "yielded":
         final_response = _append_file_mutation_footer(agent, final_response, logger)
-    if not interrupted:
+    if not interrupted and _turn_exit_reason != "yielded":
         final_response = _explain_abnormal_exit(
             agent, final_response, _turn_exit_reason, preserved_verification_fallback, logger,
         )
