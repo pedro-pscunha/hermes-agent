@@ -440,6 +440,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 |---|---|---|---|---|
 | [`pre_tool_call`](#pre_tool_call) | Directive/control | Once before execution; first valid `block` or `approve` directive wins, and `modify` returns are shallow-merged into the tool arguments. | `tool_name`, `args`, `task_id`, `session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `middleware_trace` | Raw arguments may contain user content, paths, commands, or secrets. |
 | `post_tool_call` | Observer | After blocked, error, or successful result; return ignored. | `tool_name`, `args`, `result`, `task_id`, `session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, `error_message`, `middleware_trace` | Result/error text may contain arbitrary tool or user content and secrets. |
+| `post_tool_round` | Turn control | After the entire tool batch is persisted; exactly `{"action": "yield"}` ends this turn silently. | `task_id`, `session_id`, `turn_id`, `api_request_id`, `tool_call_ids` (outer-call ID tuple) | Identity metadata only; no arguments, results, or transcript. |
 | `transform_tool_result` | Transform | After `post_tool_call`, before conversation append; first string replaces the result. | `tool_name`, `args`, `result`, `task_id`, `session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, `error_message` | Exposes the full model-bound result and arguments. |
 | `transform_terminal_output` | Transform | After bounded foreground process capture, before final output limiting; first string replaces output. | `command`, `output`, `returncode`, `task_id`, `env_type` | Command/output may contain credentials. |
 | `pre_transcription` | Transform | Fired by the STT dispatcher after provider resolution and before any backend (built-in, command-type, or plugin-registered) is invoked; dict results are applied in registration order, last-writer-wins per field (`prompt`, `language`, `model`; `file_path` is read-only). | `file_path`, `provider`, `model`, `language`, `prompt`, `source` | The final prompt is uploaded to the configured STT provider with the audio — keep secrets out of hook returns. |
@@ -606,6 +607,14 @@ def register(ctx):
 ```
 
 ---
+
+### `post_tool_round`
+
+This hook is Python-plugin-only. Shell registration is refused because the shell response parser cannot return its yield directive.
+
+Python plugins may return exactly `{"action": "yield"}` after the current tool batch has finished and its results are persisted. The normal turn finalizer persists `[SILENT]` and runs output hooks without another model request. This ends the conversation turn, not the delegated task: background processes, completion watchers, and queued messages remain owned by their existing lifecycle. The callback must verify its own task/turn and current batch before yielding; a running task elsewhere is insufficient.
+
+Persistence failures, guardrail halts, and pending user interruptions take precedence. All other returns are ignored. This hook is profile-scoped and timeout-bounded; a timeout or exception continues normally, and a late callback return cannot affect any turn. There is no retained yield flag. `post_tool_call` remains observational. Standalone `handle_function_call()` has no conversation round and does not invoke this hook. Check membership in `hermes_cli.plugins.VALID_HOOKS` before requiring this capability; unknown hook registration alone does not prove runtime support.
 
 ### `post_tool_call`
 
