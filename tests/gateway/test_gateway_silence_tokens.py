@@ -42,7 +42,7 @@ def _runner(monkeypatch, tmp_path):
     runner._pending_messages = {}
     runner._pending_approvals = {}
     runner._is_user_authorized = lambda _source: True
-    runner._set_session_env = lambda _context: None
+    runner._set_session_env = lambda _context, **_kwargs: None
     runner._handle_active_session_busy_message = AsyncMock(return_value=False)
     runner._session_db = MagicMock()
     runner._recover_telegram_topic_thread_id = lambda _source: None
@@ -232,6 +232,65 @@ async def test_queued_terminal_turn_owns_the_silence_verdict(monkeypatch, tmp_pa
     response = await runner._handle_message_with_agent(
         _event(internal=True), _source(), "agent:main:telegram:group:-1001:12345", 1)
     assert "silence marker" in response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform,thread_id,chat_type,raw,reply_id,expected,nested", [
+    (Platform.WHATSAPP, None, "group", None, None, "queued-43", False),
+    (Platform.TELEGRAM, "7", "group", None, None, None, False),
+    (Platform.TELEGRAM, "7", "dm", None, None, "queued-43", False),
+    (Platform.SLACK, None, "group", {"_hermes_no_thread_response": True}, None, None, False),
+    (Platform.FEISHU, "7", "group", None, "thread-reply-43", "thread-reply-43", False),
+    (Platform.TELEGRAM, "7", "dm", None, None, None, True),
+])
+async def test_queued_final_uses_terminal_reply_anchor(
+        monkeypatch, tmp_path, platform, thread_id, chat_type, raw, reply_id, expected, nested):
+    from gateway.platforms.base import _reply_anchor_for_event
+    from tests.gateway.test_queued_final_ledger import _telegram_adapter
+
+    runner = _runner(monkeypatch, tmp_path)
+    source = SessionSource(platform=platform, chat_id="-1001", chat_type=chat_type,
+                           thread_id=thread_id, user_id="12345", message_id="opening-source")
+    session_key = "queued-reply-test"
+    opener = MessageEvent(text="first request", source=source, message_id="opening-42")
+    pending = MessageEvent(text="second request", source=source, message_id="queued-43",
+                           raw_message=raw, reply_to_message_id=reply_id)
+    runner._MAX_INTERRUPT_DEPTH = 8
+    runner._reply_anchor_for_event = _reply_anchor_for_event
+    terminal_result = {
+        "final_response": "second result", "messages": [], "tools": [], "failed": False}
+    if nested:
+        terminal_result.update(queued_terminal_inbound_id="queued-44", queued_terminal_reply_anchor=None)
+    runner._run_agent = AsyncMock(return_value=terminal_result)
+    runner._run_agent_deliver_first_response = AsyncMock()
+    runner._is_goal_continuation_event = MagicMock(return_value=False)
+    runner._session_key_for_source = MagicMock(return_value=session_key)
+    runner._prepare_profile_scoped_inbound_message_text = AsyncMock(return_value=pending.text)
+    runner._adapter_for_source = MagicMock(return_value=None)
+    runner._refresh_agent_cache_message_count = AsyncMock()
+    turn_ctx = SimpleNamespace(
+        source=source, session_id="sid", session_key=session_key, run_generation=1,
+        _interrupt_depth=0, history=[], _status_thread_metadata=None,
+        context_prompt=None, result_holder=[None])
+    merged = await runner._run_agent_queued_followup(
+        turn_ctx, adapter=None, pending=pending.text, pending_event=pending,
+        response="first result", result={"interrupted": True, "messages": []}, stream_task=None)
+    runner._run_agent = AsyncMock(return_value=merged)
+
+    adapter = _telegram_adapter()
+    adapter._message_handler = lambda event: runner._handle_message_with_agent(
+        event, source, session_key, 1)
+    adapter._wants_auto_tts = MagicMock(return_value=False)
+    await adapter._process_message_background(opener, session_key)
+
+    adapter.send.assert_awaited_once()
+    assert adapter.send.await_args.kwargs["content"] == "second result"
+    assert adapter.send.await_args.kwargs["reply_to"] == expected
+    if platform == Platform.TELEGRAM and chat_type == "dm":
+        assert adapter.send.await_args.kwargs["metadata"].get("telegram_reply_to_message_id") == expected
+    assert opener.message_id == "opening-42"
+    assert opener.ledger_message_id == ("queued-44" if nested else "queued-43")
+    assert opener.source is source
 
 
 @pytest.mark.asyncio

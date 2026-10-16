@@ -35,6 +35,12 @@ class ProcessingOutcome(Enum):
     CANCELLED = "cancelled"
 
 
+@dataclass(frozen=True)
+class FinalReplyAnchor:
+    """Resolved terminal-turn reply target; None explicitly disables a reply."""
+    reply_to: str | None
+
+
 @dataclass
 class MessageEvent:
     """Incoming message from a platform — the normalized shape all adapters produce."""
@@ -52,8 +58,7 @@ class MessageEvent:
     # (/queue) chain answers the LAST message of the chain, so its final send has to be ledgered
     # under that message's id. Keyed on the opening event's id instead, two chained turns carrying
     # the same text collide on one obligation id and the earlier turn's row is overwritten (a
-    # refused first reply then reads as delivered). Reply routing is unaffected: the reply anchor
-    # still comes from this event.
+    # refused first reply then reads as delivered). Reply routing has its own resolved snapshot.
     ledger_message_id: Optional[str] = None
     # Platform update id (Telegram ``update_id``): ``/restart`` records it so the new gateway
     # advances past it even if PTB's shutdown ACK times out.
@@ -93,6 +98,7 @@ class MessageEvent:
     _injection_target: Optional["InjectionTarget"] = field(default=None, init=False, repr=False, compare=False)
     # Run-owned final presentation snapshot; never deserialized from ingress metadata.
     _notification_reply_muted: Optional[bool] = field(default=None, init=False, repr=False, compare=False)
+    _final_reply_anchor: FinalReplyAnchor | None = field(default=None, init=False, repr=False, compare=False)
 
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""

@@ -18,7 +18,9 @@ from types import SimpleNamespace
 from typing import Dict, List, Optional
 
 from gateway.config import Platform
-from gateway.platforms.base import build_auto_tts_output_path
+from gateway.platforms.base import (
+    _final_reply_anchor_for_event, _final_thread_metadata_for_event, build_auto_tts_output_path,
+)
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.session import SessionSource
 
@@ -362,11 +364,8 @@ class GatewayVoiceMixin:
             return
         if not callable(send_voice := getattr(adapter, "send_voice", None)):
             return
-        reply_anchor = self._reply_anchor_for_event(event)
-        # notify=True mirrors the final-text path in platforms/base.py so notification-gating
-        # adapters (Telegram "important" mode) deliver it. Clone: shared w/ typing-indicator state.
-        thread_meta = dict(self._thread_metadata_for_source(event.source, reply_anchor) or {})
-        thread_meta["notify"] = True
+        reply_anchor = _final_reply_anchor_for_event(event)
+        thread_meta = _final_thread_metadata_for_event(event, build_metadata=self._thread_metadata_for_source)
         for path in audio_paths:
             await send_voice(chat_id=event.source.chat_id, audio_path=path, reply_to=reply_anchor,
                              metadata=thread_meta)

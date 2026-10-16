@@ -297,17 +297,20 @@ async def test_the_terminal_turn_of_a_chain_is_ledgered_under_its_own_inbound_id
 
 
 @pytest.mark.asyncio
-async def test_a_deeper_chain_keeps_the_innermost_inbound_id():
+@pytest.mark.parametrize("anchor", ["6003", None])
+async def test_a_deeper_chain_keeps_the_innermost_inbound_id(anchor):
     """Chained follow-ups nest, and the LAST message answered owns the ledger identity, so an id
     already set by a deeper recursion must not be overwritten on the way out."""
     GatewayRunner, runner, turn_ctx, pending_event = _chain_runner_and_ctx(
-        {"final_response": "done", "messages": [], "queued_terminal_inbound_id": "6003"})
+        {"final_response": "done", "messages": [], "queued_terminal_inbound_id": "6003",
+         "queued_terminal_reply_anchor": anchor})
 
     merged = await GatewayRunner._run_agent_queued_followup(
         runner, turn_ctx, adapter=None, pending="hi again", pending_event=pending_event,
         response="resp", result={"interrupted": True, "messages": []}, stream_task=None)
 
     assert merged["queued_terminal_inbound_id"] == "6003"
+    assert merged["queued_terminal_reply_anchor"] == anchor
 
 
 # ---------------------------------------------------------------------------

@@ -22,8 +22,8 @@ from contextlib import nullcontext, suppress
 from contextvars import copy_context
 from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
-from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome
-from gateway.platforms.event import MessageEvent
+from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome, _final_thread_metadata_for_event
+from gateway.platforms.event import FinalReplyAnchor, MessageEvent
 from gateway.response_filters import display_kind_for_event, is_machinery_display_kind
 from gateway.warning_notifications import diagnostic_metadata, diagnostic_turn_muted, diagnostic_wake_muted
 from gateway.session import (
@@ -1876,7 +1876,8 @@ class GatewayTurnMixin:
             # Streaming delivered the body, but the footer was held back (`not already_sent` gate).
             if _footer_line and adapter:
                 try:
-                    await adapter.send(source.chat_id, _footer_line, metadata=self._event_thread_metadata(event, source))
+                    await adapter.send(source.chat_id, _footer_line, metadata=_final_thread_metadata_for_event(
+                        event, build_metadata=self._thread_metadata_for_source))
                 except Exception as _e:
                     logger.debug("trailing footer send failed: %s", _e)
             # Return None so the body isn't sent twice; stash the delivered text on the event for the
@@ -2130,12 +2131,14 @@ class GatewayTurnMixin:
 
             # A queued (/queue) chain answered the LAST message of the chain, so the outer final
             # send (bracketed by the adapter against this event) must be ledgered under that
-            # message's id or it collides with an earlier turn's row carrying the same text. Reply
-            # routing is untouched: the anchor still comes from this event.
+            # message's id or it collides with an earlier turn's row carrying the same text.
+            # Its resolved reply target is separate from the raw inbound ledger identity.
             if isinstance(agent_result, dict):
                 _terminal_inbound = agent_result.get("queued_terminal_inbound_id")
                 if _terminal_inbound:
                     event.ledger_message_id = str(_terminal_inbound)
+                if "queued_terminal_reply_anchor" in agent_result:
+                    event._final_reply_anchor = FinalReplyAnchor(agent_result["queued_terminal_reply_anchor"])
                 if "queued_terminal_notification_category" in agent_result:
                     event.metadata["notification_category"] = agent_result["queued_terminal_notification_category"]
                 if isinstance(agent_result.get("_notification_reply_muted"), bool):
@@ -3828,6 +3831,7 @@ class GatewayTurnMixin:
             merged = {
                 **merged,
                 "queued_terminal_inbound_id": next_inbound_id,
+                "queued_terminal_reply_anchor": next_message_id,
                 "queued_terminal_display_kind": next_display_kind,
                 "queued_terminal_notification_category": (
                     (pending_event.metadata or {}).get("notification_category", "result")

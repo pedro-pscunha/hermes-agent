@@ -303,7 +303,9 @@ class GatewayNotificationsMixin:
         with _log_suppressed(logging.WARNING, "Post-stream media extraction failed: %s"):
             # Capture [[as_document]] before extract_media strips it: images then go via send_document.
             force_document_attachments = "[[as_document]]" in response
-            from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
+            from gateway.platforms.base import (
+                BasePlatformAdapter, _final_thread_metadata_for_event, should_send_media_as_audio,
+            )
             media_files, cleaned = adapter.extract_media(response)
             media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
             # Strip image URLs (parity with the non-streaming chain); no extract_local_files here.
@@ -318,7 +320,7 @@ class GatewayNotificationsMixin:
             _thread_meta = (
                 dict(thread_metadata)
                 if thread_metadata is not None
-                else self._thread_metadata_for_source(event.source, self._reply_anchor_for_event(event))
+                else _final_thread_metadata_for_event(event, build_metadata=self._thread_metadata_for_source)
             )
             chat_id = event.source.chat_id
             # Images go out as one batch (e.g. Signal's multi-attachment RPC) unless [[as_document]].

@@ -174,6 +174,26 @@ def _reply_anchor_for_event(event) -> str | None:
     return getattr(event, "message_id", None)
 
 
+def _final_reply_anchor_for_event(event: "MessageEvent") -> str | None:
+    """Queued finals answer their terminal turn without changing ingress identity."""
+    if event._final_reply_anchor is not None:
+        return event._final_reply_anchor.reply_to
+    return _reply_anchor_for_event(event)
+
+
+def _final_thread_metadata_for_event(
+    event: "MessageEvent", *,
+    build_metadata: "Callable[[SessionSource, str | None], dict | None]" = _thread_metadata_for_source,
+) -> dict:
+    anchor = _final_reply_anchor_for_event(event)
+    metadata = _mark_notify_metadata(build_metadata(event.source, anchor))
+    if event._final_reply_anchor is not None and anchor is None:
+        # The source fallback belongs to the opening event, not this no-reply final.
+        metadata.pop("telegram_reply_to_message_id", None)
+        metadata.pop("message_id", None)
+    return metadata
+
+
 def _media_failure_text(kind: str, file_name: "str | None" = None) -> str:
     """User-facing "couldn't deliver" notice; ``file_name`` is the only name ever shown."""
     suffix = f" ({file_name})" if file_name else ""
@@ -4125,7 +4145,7 @@ class BasePlatformAdapter(ABC):
         """Normal-lane final: the ledger bracket plus the message-id owner's ephemeral delete."""
         result, delivery_adapter = await self.send_final_ledgered(
             event, session_key, text_content, metadata,
-            reply_to=_reply_anchor_for_event(event), is_ephemeral_response=is_ephemeral_response)
+            reply_to=_final_reply_anchor_for_event(event), is_ephemeral_response=is_ephemeral_response)
         record_delivery(result)
         if ephemeral_ttl and ephemeral_ttl > 0 and result.success and result.message_id:
             delivery_adapter._schedule_ephemeral_delete(event.source.chat_id, result.message_id, ephemeral_ttl)
@@ -4309,7 +4329,7 @@ class BasePlatformAdapter(ABC):
                     response, event, session_key, is_ephemeral_response=is_ephemeral_response)
                 text_content, media_files = extracted.text_content, extracted.media_files
                 # Final content gets notify=True; typing metadata stays unmarked (thread-strict).
-                _final_thread_metadata = _mark_notify_metadata(_thread_metadata)
+                _final_thread_metadata = _final_thread_metadata_for_event(event)
                 _tts_paths, _tts_requested_path = [], None
                 if self._wants_auto_tts(
                         event, session_key, interrupt_event, text_content, media_files):
