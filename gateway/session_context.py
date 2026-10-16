@@ -159,6 +159,27 @@ def scoped_current_session_id(session_id: str | None = None) -> Iterator[None]:
         _SESSION_ID.set(previous)
 
 
+@contextmanager
+def preserve_session_context() -> Iterator[None]:
+    """Restore the outer native binding after a same-task queued turn rebinds it.
+
+    ``clear_session_vars`` deliberately clears rather than restoring tokens. Keep
+    that public behavior, but preserve exact values (including unset) for nesting.
+    """
+    from agent.runtime_cwd import reset_session_cwd, set_session_cwd
+
+    variables = (*_VAR_MAP.values(), _NATIVE_TARGET, _INJECTION_ORIGIN,
+                 _SESSION_ASYNC_DELIVERY, _SESSION_HISTORY_DELIVERY)
+    tokens = [(var, var.set(var.get())) for var in variables]
+    cwd_token = set_session_cwd(None)
+    try:
+        yield
+    finally:
+        reset_session_cwd(cwd_token)
+        for var, token in reversed(tokens):
+            var.reset(token)
+
+
 def source_route_metadata(source: Any, metadata: dict | None) -> dict | None:
     """Keep inbound route anchors for durable deliveries after the source is gone."""
     anchors = {key: str(value) for key in ("scope_id", "parent_chat_id")
