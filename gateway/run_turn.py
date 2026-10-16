@@ -27,7 +27,7 @@ from gateway.platforms.event import MessageEvent
 from gateway.response_filters import display_kind_for_event, is_machinery_display_kind
 from gateway.warning_notifications import diagnostic_metadata, diagnostic_turn_muted, diagnostic_wake_muted
 from gateway.session import (
-    SessionSource, _session_key_namespace, build_channel_continuity_note,
+    SessionContext, SessionSource, _session_key_namespace, build_channel_continuity_note,
     build_session_context,
 )
 from gateway.session_transcript import TranscriptReadError
@@ -3679,6 +3679,7 @@ class GatewayTurnMixin:
         """Run the queued / interrupting follow-up as the next turn (recursive ``_run_agent``)."""
         from gateway.platforms.base import merge_pending_message_event
         from gateway.run import _preserve_queued_followup_history_offset
+        from gateway.session_context import preserve_session_context
         source, session_id, session_key, run_generation = (
             turn_ctx.source, turn_ctx.session_id, turn_ctx.session_key, turn_ctx.run_generation,
         )
@@ -3789,16 +3790,23 @@ class GatewayTurnMixin:
         try:
             await self._refresh_agent_cache_message_count(session_key, session_id)
 
-            followup_result = await self._run_agent(
-                message=next_message, context_prompt=turn_ctx.context_prompt, history=updated_history,
-                source=next_source, session_id=session_id, session_key=next_session_key,
-                run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
-                event_message_id=next_message_id, inbound_message_id=next_inbound_id,
-                channel_prompt=next_channel_prompt, message_type=next_message_type,
-                persist_user_message=next_persist_message,
-                persist_user_display_kind=next_display_kind,
-                persist_user_display_metadata=diagnostic_metadata(pending_event) or None,
-            )
+            with preserve_session_context() if pending_event is not None else nullcontext():
+                if pending_event is not None:
+                    # Recursive turns bypass _hmwa_prepare_turn. Tools and any new
+                    # process watcher must capture this event, not the outer turn.
+                    context = SessionContext(source=next_source, connected_platforms=[], home_channels={},
+                        session_key=next_session_key, session_id=session_id)
+                    self._set_session_env(context, injection_origin=getattr(pending_event, "_injection_target", None))
+                followup_result = await self._run_agent(
+                    message=next_message, context_prompt=turn_ctx.context_prompt, history=updated_history,
+                    source=next_source, session_id=session_id, session_key=next_session_key,
+                    run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
+                    event_message_id=next_message_id, inbound_message_id=next_inbound_id,
+                    channel_prompt=next_channel_prompt, message_type=next_message_type,
+                    persist_user_message=next_persist_message,
+                    persist_user_display_kind=next_display_kind,
+                    persist_user_display_metadata=diagnostic_metadata(pending_event) or None,
+                )
         except asyncio.CancelledError:
             await _run_followup_processing_hook(
                 _hook_adapter, pending_event, "on_processing_complete", _followup_cancel_outcome(_hook_adapter))
